@@ -17,9 +17,6 @@ if rank == 0:
     logging.basicConfig(level=logging.INFO)
 
 
-random.seed(rank)
-
-
 """
 First stage - decide how much land to buy; total_acreage is first stage variable
 multi-year problem
@@ -54,6 +51,7 @@ class Farmer(object):
         self.PurchasePrice = dict()
         self.PlantingCostPerAcre = dict()
         for year in self.years:
+            random.seed(year)
             l, u = 500, 2000
             self.PriceQuota[year] = dict(WHEAT=random.uniform(l, u), CORN=random.uniform(l, u), SUGAR_BEETS=random.uniform(l, u))
             l, u = 100, 300
