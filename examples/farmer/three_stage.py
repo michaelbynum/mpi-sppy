@@ -215,7 +215,7 @@ def solve_with_extensive_form():
                            all_scenario_names=farmer.scenarios,
                            scenario_creator=create_scenario,
                            scenario_creator_kwargs=scenario_kwargs,
-                           all_nodenames=['ROOT'] + ['ROOT_' + str(i-1) for i in farmer.years])
+                           all_nodenames=['ROOT'] + ['ROOT_' + str(i-1) for i in farmer.years] + ['ROOT_' + str(i-1) + '_' + str(ndx) for i in farmer.years for ndx, crop_yield in enumerate(farmer.crop_yield)])
     results = opt.solve_extensive_form()
     opt.report_var_values_at_rank0()
 
@@ -231,7 +231,7 @@ def solve_with_SC():
                              all_scenario_names=farmer.scenarios,
                              scenario_creator=create_scenario,
                              scenario_creator_kwargs=scenario_kwargs,
-                             all_nodenames=['ROOT'] + ['ROOT_' + str(i-1) for i in farmer.years])
+                             all_nodenames=['ROOT'] + ['ROOT_' + str(i-1) for i in farmer.years] + ['ROOT_' + str(i-1) + '_' + str(ndx) for i in farmer.years for ndx, crop_yield in enumerate(farmer.crop_yield)])
     results = opt.solve()
     opt.report_var_values_at_rank0()
 
