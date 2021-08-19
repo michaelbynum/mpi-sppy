@@ -9,6 +9,7 @@ from pyomo.core.expr.visitor import identify_variables
 from mpi4py import MPI
 from mpisppy.utils.sputils import find_active_objective
 from pyomo.common.collections.component_set import ComponentSet
+import numpy as np
 
 
 logger = logging.getLogger('mpisppy.sc')
@@ -41,6 +42,7 @@ class _SCInterface(parapint.interfaces.MPIStochasticSchurComplementInteriorPoint
 
         self._used_unfixed_vars_by_scenario = dict()
 
+        # gather all nonanticipative variable ids
         nonant_var_identifiers = list()
         nonant_var_identifiers_set = set()
         for scen_name, scen_model in self.local_scenario_models.items():
@@ -65,8 +67,50 @@ class _SCInterface(parapint.interfaces.MPIStochasticSchurComplementInteriorPoint
                 nonant_var_identifiers.append(nonant_id)
                 nonant_var_identifiers_set.add(nonant_id)
 
+        # preprocess any fixed nonanticipative variables
+        fixed_nonants = np.zeros(len(nonant_var_identifiers), dtype=np.int64)
+        fixed_nonant_values = np.zeros(len(nonant_var_identifiers), dtype=np.float64)
+        discrepancy = False
+        for ndx, nonant_id in enumerate(nonant_var_identifiers):
+            for scen_name, scen_model in self.local_scenario_models.items():
+                if nonant_id in scen_model._mpisppy_data.nonant_indices:
+                    v = scen_model._mpisppy_data.nonant_indices[nonant_id]
+                    if v.is_fixed():
+                        if fixed_nonants[ndx] == 1:
+                            if abs(v.value - fixed_nonant_values[ndx]) > 1e-15:
+                                discrepancy = True
+                                break
+                        else:
+                            fixed_nonants[ndx] = 1
+                            fixed_nonant_values[ndx] = v.value
+            if discrepancy:
+                break
+        discrepancy = comm.allreduce(discrepancy, op=MPI.LOR)
+        if discrepancy:
+            raise ValueError('Found discrepancy between values for fixed nonanticipative variables')
+
+        num_fixed_nonants = np.zeros(len(nonant_var_identifiers), dtype=np.int64)
+        all_fixed_nonant_values = np.zeros(len(nonant_var_identifiers), dtype=np.float64)
+        comm.Allreduce(fixed_nonants, num_fixed_nonants, MPI.SUM)
+        comm.Allreduce(fixed_nonant_values, all_fixed_nonant_values, MPI.SUM)
+        any_fixed_nonants = num_fixed_nonants >= 1
+        all_fixed_nonant_values[any_fixed_nonants] = all_fixed_nonant_values[any_fixed_nonants] / num_fixed_nonants[any_fixed_nonants]
+
+        if np.any(np.bitwise_and(np.abs(all_fixed_nonant_values - fixed_nonant_values) >= 1e-15, fixed_nonants)):
+            raise ValueError('Found discrepancy between values for fixed nonanticipative variables')
+        new_nonant_var_identifiers = list()
+        for ndx, nonant_id in enumerate(nonant_var_identifiers):
+            if any_fixed_nonants[ndx]:
+                for scen_name, scen_model in self.local_scenario_models.items():
+                    if nonant_id in scen_model._mpisppy_data.nonant_indices:
+                        v = scen_model._mpisppy_data.nonant_indices[nonant_id]
+                        v.fix(float(all_fixed_nonant_values[ndx]))
+                        self._used_unfixed_vars_by_scenario[scen_name].discard(v)
+            else:
+                new_nonant_var_identifiers.append(nonant_id)
+
         super(_SCInterface, self).__init__(scenarios=all_scenario_names,
-                                           nonanticipative_var_identifiers=nonant_var_identifiers,
+                                           nonanticipative_var_identifiers=new_nonant_var_identifiers,
                                            comm=comm,
                                            ownership_map=ownership_map)
 
