@@ -5,15 +5,14 @@ import pyomo.environ as pyo
 # NOTE: a caller attaches the comms (e.g. pre_iter0)
 
 import mpisppy.extensions.extension
-from mpisppy.utils.sputils import _ScenTree
 
 
-class XhatBase(mpisppy.extensions.extension.PHExtension):
+class XhatBase(mpisppy.extensions.extension.Extension):
     """
         Any inherited class must implement the preiter0, postiter etc. methods
         
         Args:
-            opt (SPBase object): gives the problem that we bound
+            opt (SPOpt object): gives the problem that we bound
 
         Attributes:
           scenario_name_to_rank (dict of dict): nodes (i.e. comms) scen names
@@ -104,7 +103,6 @@ class XhatBase(mpisppy.extensions.extension.PHExtension):
                     print("rank=",self.cylinder_rank, "xhats bcast failed on ndn={}, src_rank={}"\
                           .format(ndn,src_rank))
                     raise
-    
             # assemble xhat (which is a nonants dict) from xhats
             for ndn in xhats:
                 for i in range(cistart[ndn], nlens[ndn]):
@@ -122,7 +120,7 @@ class XhatBase(mpisppy.extensions.extension.PHExtension):
 
         # NOTE: for APH we may need disable_pyomo_signal_handling
         self.opt.solve_loop(solver_options=sopt,
-                           dis_W=True, dis_prox=True,
+                           #dis_W=True, dis_prox=True,
                            verbose=verbose,
                            tee=Tee)
 
@@ -136,11 +134,9 @@ class XhatBase(mpisppy.extensions.extension.PHExtension):
             if verbose and src_rank == self.cylinder_rank:
                 print("   Feasible xhat found:")
                 self.opt.local_scenarios[sname].pprint()
-            self.opt._disable_W_and_prox()
             obj = self.opt.Eobjective(verbose=verbose)
             if restore_nonants:
                 self.opt._restore_nonants()
-                self.opt._reenable_W_and_prox()  # not needed when a spoke
             return obj
 
     #**********
@@ -194,13 +190,21 @@ class XhatBase(mpisppy.extensions.extension.PHExtension):
     derived from XhatBase, but that is not why the code is here. It was
     factored simply for the usual reasons to factor code.  """
 
-    def xhat_common_post_everything(self, extname, obj, snamedict):
+    def xhat_common_post_everything(self, extname, obj, snamedict, restored_nonants):
         """ Code that most xhat post_everything routines will want to call.
         Args:
             extname (str): the name of the extension for reporting
             obj (float): the xhat objective function
             snamedict (dict): the (scenario) names upon which xhat is based
+            restored_nonants (bool): if the restore_nonants flag was True on the last
+                call to _try_one.
         """
+        if (obj is not None) and (not restored_nonants):
+            # a tree solution is available
+            self.opt.tree_solution_available = True
+            self.opt.first_stage_solution_available = True
+        if (obj is not None) and (self.opt.spcomm is not None):
+            self.opt.spcomm.BestInnerBound = self.opt.spcomm.InnerBoundUpdate(obj, char='E')
         if self.cylinder_rank == 0 and self.verbose:
             print ("****", extname ,"Used scenarios",
                    str(snamedict),"to get xhat Eobj=",obj)
@@ -264,7 +268,7 @@ to a dictionary mapping scenario name to rank number.
 Naming conventions:
 
 = non-leaf nodes other than ROOT are named <parent>_nodenum so for the
-example, there are three non-leaf nodes named ROOT, ROOT_1, and ROOT_2
+example, there are three non-leaf nodes named ROOT, ROOT_0, and ROOT_1
 
 = we happen to be given a list of scenario names that has the same
 length as the number of scenarios (i.e., the product of the branching

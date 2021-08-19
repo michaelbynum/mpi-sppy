@@ -16,7 +16,7 @@ packages = find_packages()
 
 setup(
     name='mpi-sppy',
-    version='0.9.dev0',
+    version='0.9.1.dev0',
     description="mpi-sppy",
     url='https://github.com/Pyomo/mpi-sppy',
     author='David Woodruff',
@@ -24,6 +24,6 @@ setup(
     packages=packages,
     install_requires=[
         'numpy>=1.19',
-        'pyomo>=5.7.1'
+        'pyomo>=6.0'
     ]
 )

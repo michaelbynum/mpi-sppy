@@ -239,27 +239,27 @@ def scenario_denouement(rank, scenario_name, scenario):
     pass
 
 if __name__ == "__main__":
-    PHoptions = {}
-    PHoptions["asynchronousPH"] = False
-    PHoptions["solvername"] = "cplex"
-    PHoptions["PHIterLimit"] = 200
-    PHoptions["defaultPHrho"] = 1
-    PHoptions["convthresh"] = 0.0001
-    PHoptions["subsolvedirectives"] = None
-    PHoptions["verbose"] = False
-    PHoptions["display_timing"] = True
-    PHoptions["display_progress"] = True
-    PHoptions["iter0_solver_options"] = None
-    PHoptions["iterk_solver_options"] = None
-    PHoptions["branching_factors"] = [3, 3]
-    PHoptions["xhat_looper_options"] =  {"xhat_solver_options":\
+    options = {}
+    options["asynchronousPH"] = False
+    options["solvername"] = "cplex"
+    options["PHIterLimit"] = 200
+    options["defaultPHrho"] = 1
+    options["convthresh"] = 0.0001
+    options["subsolvedirectives"] = None
+    options["verbose"] = False
+    options["display_timing"] = True
+    options["display_progress"] = True
+    options["iter0_solver_options"] = None
+    options["iterk_solver_options"] = None
+    options["branching_factors"] = [3, 3]
+    options["xhat_looper_options"] =  {"xhat_solver_options":\
                                          None,
                                          "scen_limit": 3,
                                          "dump_prefix": "delme",
                                          "csvname": "looper.csv"}
 
     # branching factor (3 stages is hard-wired)
-    BFs = PHoptions["branching_factors"]
+    BFs = options["branching_factors"]
     ScenCount = BFs[0] * BFs[1]
     all_scenario_names = list()
     for sn in range(ScenCount):
@@ -267,28 +267,23 @@ if __name__ == "__main__":
     # end hardwire
 
     # This is multi-stage, so we need to supply node names
-    all_nodenames = ["ROOT"] # all trees must have this node
-    # The rest is a naming convention invented for this problem.
-    # Note that mpisppy does not have nodes at the leaves,
-    # and node names must end in a serial number.
-    for b in range(BFs[0]):
-        all_nodenames.append("ROOT_"+str(b))
+    all_nodenames = sputils.create_nodenames_from_BFs(BFs)
 
     # **** ef ****
-    solver = pyo.SolverFactory(PHoptions["solvername"])
+    solver = pyo.SolverFactory(options["solvername"])
 
     ef = sputils.create_EF(
         all_scenario_names,
         scenario_creator,
         scenario_creator_kwargs={"branching_factors": BFs},
     )
-    results = solver.solve(ef, tee=PHoptions["verbose"])
+    results = solver.solve(ef, tee=options["verbose"])
     print('EF objective value:', pyo.value(ef.EF_Obj))
     sputils.ef_nonants_csv(ef, "vardump.csv")
 
     # **** ph ****
-    PHoptions["xhat_specific_options"] = {"xhat_solver_options":
-                                          PHoptions["iterk_solver_options"],
+    options["xhat_specific_options"] = {"xhat_solver_options":
+                                          options["iterk_solver_options"],
                                           "xhat_scenario_dict": \
                                           {"ROOT": "Scen1",
                                            "ROOT_0": "Scen1",
@@ -298,7 +293,7 @@ if __name__ == "__main__":
 
     # as of april 2020, we are not supporting xhat as an extension
     ph = mpisppy.opt.ph.PH(
-        PHoptions,
+        options,
         all_scenario_names,
         scenario_creator,
         scenario_denouement,
@@ -310,7 +305,7 @@ if __name__ == "__main__":
     if ph.cylinder_rank == 0:
          print ("Trival bound =",tbound)
 
-    ph._disable_W_and_prox()
+    ph.disable_W_and_prox()
     e_obj = ph.Eobjective()
     if ph.cylinder_rank == 0:
          print ("unweighted e_obj={}".format(e_obj))
@@ -318,15 +313,15 @@ if __name__ == "__main__":
     """
     #******* APH ******
     print ("APH")
-    PHoptions["async_frac_needed"] = 1
-    PHoptions["async_sleep_secs"] = 1
-    aph = mpisppy.opt.aph.APH(PHoptions, all_scenario_names,
+    options["async_frac_needed"] = 1
+    options["async_sleep_secs"] = 1
+    aph = mpisppy.opt.aph.APH(options, all_scenario_names,
                         scenario_creator,
                               scenario_denouement,
                               all_nodenames = all_nodenames)
 
     conv, obj, bnd = aph.APH_main(
-        PH_extensions=XhatSpecific,
+        extensions=XhatSpecific,
         scenario_creator_kwargs={"branching_factors": BFs},
     )
     """

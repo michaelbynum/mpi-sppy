@@ -8,13 +8,14 @@ import sys
 import os
 import re
 import time
-from numpy import prod
+import numpy as np
 import mpisppy.scenario_tree as scenario_tree
 from pyomo.core import Objective
 
 try:
     from mpi4py import MPI
     haveMPI = True
+    global_rank = MPI.COMM_WORLD.Get_rank()
 except:
     haveMPI = False
 from pyomo.core.expr.numeric_expr import LinearExpression
@@ -119,7 +120,11 @@ def spin_the_wheel(hub_dict, list_of_spoke_dict, comm_world=None):
     # Anything that's left to do
     spcomm.finalize()
 
-    global_toc("Hub algorithm complete, waiting for termination barrier")
+    # to ensure the messages below are True
+    cylinder_comm.Barrier()
+    global_toc(f"Hub algorithm {opt_class.__name__} complete, waiting for spoke finalization")
+    global_toc(f"Spoke {sp_class.__name__} finalized", (cylinder_rank == 0 and strata_rank != 0))
+
     fullcomm.Barrier()
 
     ## give the hub the chance to catch new values
@@ -129,7 +134,93 @@ def spin_the_wheel(hub_dict, list_of_spoke_dict, comm_world=None):
     global_toc("Windows freed")
 
     return spcomm, opt_dict
-    
+
+def first_stage_nonant_npy_serializer(file_name, scenario, bundling):
+    # write just the nonants for ROOT in an npy file (e.g. for Conf Int)
+    root = scenario._mpisppy_node_list[0]
+    assert root.name == "ROOT"
+    root_nonants = np.fromiter((pyo.value(var) for var in root.nonant_vardata_list), float)
+    np.save(file_name, root_nonants)
+
+def first_stage_nonant_writer( file_name, scenario, bundling ):
+    with open(file_name, 'w') as f:
+        root = scenario._mpisppy_node_list[0]
+        assert root.name == "ROOT"
+        for var in root.nonant_vardata_list:
+            var_name = var.name
+            if bundling:
+                dot_index = var_name.find('.')
+                assert dot_index >= 0
+                var_name = var_name[(dot_index+1):]
+            f.write(f"{var_name},{pyo.value(var)}\n")
+
+def scenario_tree_solution_writer( directory_name, scenario_name, scenario, bundling ):
+    with open(os.path.join(directory_name, scenario_name+'.csv'), 'w') as f:
+        for var in scenario.component_data_objects(
+                ctype=pyo.Var,
+                descend_into=True,
+                active=True,
+                sort=True):
+            # should this be here?
+            if not var.stale:
+                var_name = var.name
+                if bundling:
+                    dot_index = var_name.find('.')
+                    assert dot_index >= 0
+                    var_name = var_name[(dot_index+1):]
+                f.write(f"{var_name},{pyo.value(var)}\n")
+
+def write_spin_the_wheel_first_stage_solution(spcomm, opt_dict, solution_file_name,
+        first_stage_solution_writer=first_stage_nonant_writer):
+    """ Write a solution file, if a solution is available, to the solution_file_name provided
+    Args:
+        spcomm : spcomm returned from spin_the_wheel
+        opt_dict : opt_dict returned from spin_the_wheel
+        solution_file_name : filename to write the solution to
+        first_stage_solution_writer (optional) : custom first stage solution writer function
+    """
+    winner = _determine_innerbound_winner(spcomm, opt_dict)
+    if winner:
+        spcomm.opt.write_first_stage_solution(solution_file_name,first_stage_solution_writer)
+
+def write_spin_the_wheel_tree_solution(spcomm, opt_dict, solution_directory_name,
+        scenario_tree_solution_writer=scenario_tree_solution_writer):
+    """ Write a tree solution directory, if available, to the solution_directory_name provided
+    Args:
+        spcomm : spcomm returned from spin_the_wheel
+        opt_dict : opt_dict returned from spin_the_wheel
+        solution_file_name : filename to write the solution to
+        scenario_tree_solution_writer (optional) : custom scenario solution writer function
+    """
+    winner = _determine_innerbound_winner(spcomm, opt_dict)
+    if winner:
+        spcomm.opt.write_tree_solution(solution_directory_name,scenario_tree_solution_writer)
+        
+def local_nonant_cache(spcomm):
+    """ Returns a dict with non-anticipative values at each local node
+        We assume that the optimization has been done before calling this
+    """
+    local_xhats = dict()
+    for k,s in spcomm.opt.local_scenarios.items():
+        for node in s._mpisppy_node_list:
+            if node.name not in local_xhats:
+                local_xhats[node.name] = [
+                    pyo.value(var) for var in node.nonant_vardata_list]
+    return local_xhats
+
+def _determine_innerbound_winner(spcomm, opt_dict):
+    if spcomm.global_rank == 0:
+        if spcomm.last_ib_idx is None:
+            best_strata_rank = -1
+            global_toc("No incumbent solution available to write!")
+        else:
+            best_strata_rank = spcomm.last_ib_idx
+    else:
+        best_strata_rank = None
+
+    best_strata_rank = spcomm.fullcomm.bcast(best_strata_rank, root=0)
+    return (spcomm.strata_rank == best_strata_rank)
+
 def make_comms(n_spokes, fullcomm=None):
     """ Create the strata_comm and cylinder_comm for hub/spoke style runs
     """
@@ -149,7 +240,6 @@ def make_comms(n_spokes, fullcomm=None):
     strata_comm = fullcomm.Split(key=global_rank, color=global_rank // nsp1)
     cylinder_comm = fullcomm.Split(key=global_rank, color=global_rank % nsp1)
     return strata_comm, cylinder_comm
-
 
 def get_objs(scenario_instance):
     """ return the list of objective functions for scenario_instance"""
@@ -208,15 +298,17 @@ def create_EF(scenario_names, scenario_creator, scenario_creator_kwargs=None,
         raise RuntimeError("create_EF() received empty scenario list")
     elif (len(scen_dict) == 1):
         scenario_instance = list(scen_dict.values())[0]
+        scenario_instance._ef_scenario_names = list(scen_dict.keys())
         if not suppress_warnings:
             print("WARNING: passed single scenario to create_EF()")
         # special code to patch in ref_vars
         scenario_instance.ref_vars = dict()
+        scenario_instance._nlens = {node.name: len(node.nonant_vardata_list) 
+                                for node in scenario_instance._mpisppy_node_list}
         for node in scenario_instance._mpisppy_node_list:
             ndn = node.name
-            nlens = {node.name: len(node.nonant_vardata_list) 
-                                for node in scenario_instance._mpisppy_node_list}
-            for i in range(nlens[ndn]):
+
+            for i in range(scenario_instance._nlens[ndn]):
                 v = node.nonant_vardata_list[i]
                 if (ndn, i) not in scenario_instance.ref_vars:
                     scenario_instance.ref_vars[(ndn, i)] = v
@@ -328,7 +420,6 @@ def _create_EF_from_scen_dict(scen_dict, EF_name=None,
     nonant_constr = pyo.Constraint(pyo.Any, name='_C_EF_')
     EF_instance.add_component('_C_EF_', nonant_constr)
 
-
     nonant_constr_suppl = pyo.Constraint(pyo.Any, name='_C_EF_suppl')
     EF_instance.add_component('_C_EF_suppl', nonant_constr_suppl)
 
@@ -410,18 +501,17 @@ def _models_have_same_sense(models):
 def is_persistent(solver):
     return isinstance(solver,
         pyo.pyomo.solvers.plugins.solvers.persistent_solver.PersistentSolver)
+    
+def ef_scenarios(ef):
+    """ An iterator to give the scenario sub-models in an ef
+    Args:
+        ef (ConcreteModel): the full extensive form model
 
-def extract_num(string):
-    ''' Given a string, extract the longest contiguous
-        integer from the right-hand side of the string.
-
-        Example:
-            scenario324 -> 324
-
-        TODO: Add Exception Handling
-    '''
-    return int(re.compile(r'(\d+)$').search(string).group(1))
-
+    Yields:
+        scenario name, scenario instance (str, ConcreteModel)
+    """    
+    for sname in ef._ef_scenario_names:
+        yield (sname, getattr(ef, sname))
 
 def ef_nonants(ef):
     """ An iterator to give representative Vars subject to non-anticipitivity
@@ -430,6 +520,9 @@ def ef_nonants(ef):
 
     Yields:
         tree node name, full EF Var name, Var value
+
+    Note:
+        not on an EF object because not all ef's are part of an EF object
     """
     for (ndn,i), var in ef.ref_vars.items():
         yield (ndn, var, pyo.value(var))
@@ -447,18 +540,148 @@ def ef_nonants_csv(ef, filename):
             outfile.write("{}, {}, {}\n".format(ndname, varname, varval))
 
             
-def ef_scenarios(ef):
-    """ An iterator to give the scenario sub-models in an ef
+def nonant_cache_from_ef(ef,verbose=False):
+    """ Populate a nonant_cache from an ef. Also works with multi-stage
+    Args:
+        ef (mpi-sppy ef): a solved ef
+    Returns:
+        nonant_cache (dict of numpy arrays): a special structure for nonant values
+    """     
+    nonant_cache = dict()
+    nodenames = set([ndn for (ndn,i) in ef.ref_vars])
+    for ndn in sorted(nodenames):
+        nonant_cache[ndn]=[]
+        i = 0
+        while ((ndn,i) in ef.ref_vars):
+            xvar = pyo.value(ef.ref_vars[(ndn,i)])
+            nonant_cache[ndn].append(xvar)
+            if verbose:
+                print("barfoo", i, xvar)
+            i+=1
+    return nonant_cache
+
+
+def ef_ROOT_nonants_npy_serializer(ef, filename):
+    """ write the root node nonants to be ready by a numpy load
     Args:
         ef (ConcreteModel): the full extensive form model
+        filename (str): the full name of the .npy output file
+    """
+    root_nonants = np.fromiter((v for ndn,var,v in ef_nonants(ef) if ndn == "ROOT"), float)
+    np.save(filename, root_nonants)
 
-    Yields:
-        scenario name, scenario instance (str, ConcreteModel)
+def write_ef_first_stage_solution(ef,
+                                  solution_file_name,
+                                  first_stage_solution_writer=first_stage_nonant_writer):
+    """ 
+    Write a solution file, if a solution is available, to the solution_file_name provided
+    Args:
+        ef : A Concrete Model of the Extensive Form (output of create_EF). 
+             We assume it has already been solved.
+        solution_file_name : filename to write the solution to
+        first_stage_solution_writer (optional) : custom first stage solution writer function
+    
+    NOTE:
+        This utility is replicating write_spin_the_wheel_first_stage_solution for EF
+    """
+    if not haveMPI or (global_rank==0):
+        dirname = os.path.dirname(solution_file_name)
+        if dirname != '':
+            os.makedirs(os.path.dirname(solution_file_name), exist_ok=True)
+            representative_scenario = getattr(ef,ef._ef_scenario_names[0])
+            first_stage_solution_writer(solution_file_name, 
+                                        representative_scenario,
+                                        bundling=False)
+
+def write_ef_tree_solution(ef, solution_directory_name,
+        scenario_tree_solution_writer=scenario_tree_solution_writer):
+    """ Write a tree solution directory, if available, to the solution_directory_name provided
+    Args:
+        ef : A Concrete Model of the Extensive Form (output of create_EF). 
+             We assume it has already been solved.
+        solution_file_name : filename to write the solution to
+        scenario_tree_solution_writer (optional) : custom scenario solution writer function
+        
+    NOTE:
+        This utility is replicating write_spin_the_wheel_tree_solution for EF
+    """
+    if not haveMPI or (global_rank==0):
+        os.makedirs(solution_directory_name, exist_ok=True)
+        for scenario_name, scenario in ef_scenarios(ef):
+            scenario_tree_solution_writer(solution_directory_name,
+                                          scenario_name, 
+                                          scenario,
+                                          bundling=False)
+    
+
+def extract_num(string):
+    ''' Given a string, extract the longest contiguous
+        integer from the right-hand side of the string.
+
+        Example:
+            scenario324 -> 324
+
+        TODO: Add Exception Handling
+    '''
+    return int(re.compile(r'(\d+)$').search(string).group(1))
+
+def node_idx(node_path,branching_factors):
+    '''
+    Computes a unique id for a given node in a scenario tree.
+    It follows the path to the node, computing the unique id for each ascendant.
+
+    Parameters
+    ----------
+    node_path : list of int
+        A list of integer, specifying the path of the node.
+    branching_factors : list of int
+        branching_factors of the scenario tree.
+
+    Returns
+    -------
+    node_idx
+        Node unique id.
+        
+    NOTE: Does not work with unbalanced trees.
+
+    '''
+    if node_path == []: #ROOT node
+        return 0
+    else:
+        stage_id = 0 #node unique id among stage t+1 nodes.
+        for t in range(len(node_path)):
+            stage_id = node_path[t]+branching_factors[t]*stage_id
+        node_idx = _nodenum_before_stage(len(node_path),branching_factors)+stage_id
+        return node_idx
+
+def _extract_node_idx(nodename,branching_factors):
     """
     
-    for sname in ef._ef_scenario_names:
-        yield (sname, getattr(ef, sname))
 
+    Parameters
+    ----------
+    nodename : str
+        The name of a node, e.g. 'ROOT_2_0_4'.
+    branching_factors : list
+        Branching factor of a scenario tree, e.g. [3,2,8,4,3].
+
+    Returns
+    -------
+    node_idx : int
+        A unique integer that can be used as a key to designate this scenario.
+
+    """
+    if nodename =='ROOT':
+        return 0
+    else:
+        to_list = [int(x) for x in re.findall(r'\d+',nodename)]
+        return node_idx(to_list,branching_factors)
+
+def parent_ndn(nodename):
+    if nodename == 'ROOT':
+        return None
+    else:
+        return re.search('(.+)_(\d+)',nodename).group(1)
         
 def option_string_to_dict(ostr):
     """ Convert a string to the standard dict for solver options.
@@ -540,58 +763,124 @@ def scens_to_ranks(scen_count, n_proc, rank, BFs = None):
         scenario_names_to_ranks, slices, = tree.scen_name_to_rank(n_proc, rank)
         return slices, scenario_names_to_ranks
 
+def _nodenum_before_stage(t,branching_factors):
+    #How many nodes in a tree of stage 1,2,...,t ?
+    #Only works with branching factors
+    return int(sum(np.prod(branching_factors[0:i]) for i in range(t)))
+
+def find_leaves(all_nodenames):
+    #Take a list of all nodenames from a tree, and find the leaves of it.
+    #WARNING: We do NOT check that the tree is well constructed
+    
+    if all_nodenames is None or all_nodenames == ['ROOT']:
+        return {'ROOT':False} # 2 stage problem: no leaf nodes in all_nodenames
+    #A leaf is simply a root with no child n°0
+    is_leaf = dict()
+    for ndn in all_nodenames:
+        if ndn+"_0" in all_nodenames:
+            is_leaf[ndn] = False
+        else:
+            is_leaf[ndn] = True
+    return is_leaf
+            
+    
 class _TreeNode():
-    # everything is zero based, even stage numbers (perhaps not used)
+    #Create the subtree generated by a node, with associated scenarios
+    # stages are 1-based, everything else is 0-based
     # scenario lists are stored as (first, last) indices in all_scenarios
-    def __init__(self, Parent, scenfirst, scenlast, BFs, name):
-        self.scenfirst = scenfirst
-        self.scenlast = scenlast
+    #This is also checking that the nodes from all_nodenames are well-named.
+    def __init__(self, Parent, scenfirst, scenlast, desc_leaf_dict, name):
+        #desc_leaf_dict is the output of find_leaves
+        self.scenfirst = scenfirst #id of the first scenario with this node
+        self.scenlast = scenlast #id of the last scenario with this node
         self.name = name
+        numscens = scenlast - scenfirst + 1 #number of scenarios with this node
+        self.is_leaf = False
         if Parent is None:
             assert(self.name == "ROOT")
-            self.stage = 0
+            self.stage = 1
         else:
             self.stage = Parent.stage + 1
-        # make children
-        self.kids = list()
-        bf = BFs[self.stage]        
-        if self.stage < len(BFs)-1:
-            numscens = scenlast - scenfirst + 1
-            assert numscens % bf == 0
-            scens_per_new_node = numscens // bf
+        if len(desc_leaf_dict)==1 and list(desc_leaf_dict.keys()) == ['ROOT']: 
+            #2-stage problem, we don't create leaf nodes
+            self.kids = []
+        elif not name+"_0" in desc_leaf_dict:
+            self.is_leaf = True
+            self.kids = []
+        else:
+            if len(desc_leaf_dict) < numscens:                
+                raise RuntimeError(f"There are more scenarios ({numscens}) than remaining leaves, for the node {name}")
+            # make children
             first = scenfirst
-            ## FIX so scenfirst, scenlast is global
-            for b in range(bf):
-                last = first+scens_per_new_node - 1 
-                self.kids.append(_TreeNode(self,
-                                           first, last,
-                                           BFs,
-                                           self.name+f'_{b}'))
-                first += scens_per_new_node
-            else: # no break
-                assert last == scenlast
+            self.kids = list()
+            child_regex = re.compile(name+'_\d*\Z')
+            child_list = [x for x in desc_leaf_dict if child_regex.match(x) ]
+            for i in range(len(desc_leaf_dict)):
+                childname = name+f"_{i}"
+                if not childname in desc_leaf_dict:
+                    if len(child_list) != i:
+                        raise RuntimeError("The all_nodenames argument is giving an inconsistent tree."
+                                           f"The node {name} has {len(child_list)} children, but {childname} is not one of them.")
+                    break
+                childdesc_regex = re.compile(childname+'(_\d*)*\Z')
+                child_leaf_dict = {ndn:desc_leaf_dict[ndn] for ndn in desc_leaf_dict \
+                                   if childdesc_regex.match(ndn)}
+                #We determine the number of children of this node
+                child_scens_num = sum(child_leaf_dict.values())
+                last = first+child_scens_num - 1
+                self.kids.append(_TreeNode(self, first, last, 
+                                           child_leaf_dict, childname))
+                first += child_scens_num
+            if last != scenlast:
+                print("Hello", numscens)
+                raise RuntimeError(f"Tree node did not initialize correctly for node {name}.")
+    def stage_max(self):
+        #Return the number of stages of a subtree.
+        #Also check that all the subtrees have the same number of stages
+        #i.e. that the leaves are always on the same stage. 
+        if self.is_leaf:
+            return 1
+        else:
+            l = [child.stage_max() for child in self.kids]
+            if l.count(l[0]) != len(l):
+                maxstage = max(l)+ self.stage
+                minstage = min(l)+ self.stage
+                raise RuntimeError("The all_nodenames argument is giving an inconsistent tree. "
+                                   f"The node {self.name} has descendant leaves with stages going from {minstage} to {maxstage}")
+            return 1+l[0]
+            
+                    
 
                 
 class _ScenTree():
-    #  (perhaps not used)
-    def __init__(self, BFs, ScenNames):
+    def __init__(self, all_nodenames, ScenNames):
+        if all_nodenames is None:
+            all_nodenames = ['ROOT'] #2 stage problem: no leaf nodes
         self.ScenNames = ScenNames
         self.NumScens = len(ScenNames)
-        assert(self.NumScens == prod(BFs))
-        self.NumStages = len(BFs)
-        self.BFs = BFs
         first = 0
         last = self.NumScens - 1
-        self.rootnode = _TreeNode(None, first, last, BFs, "ROOT")
+        desc_leaf_dict = find_leaves(all_nodenames)
+        self.rootnode = _TreeNode(None, first, last, desc_leaf_dict, "ROOT")
         def _nonleaves(nd):
-            retval = [nd]
-            if nd.stage < len(BFs) - 1:
-                for kid in nd.kids:
-                    retval += _nonleaves(kid)
-            return retval
+            if nd.is_leaf:
+                return []
+            else:
+                retval = [nd]
+                for child in nd.kids:
+                    retval+=_nonleaves(child)
+                return retval
         self.nonleaves = _nonleaves(self.rootnode)
-        self.NonLeafTerminals = [nd for nd in self.nonleaves if nd.stage == len(BFs) - 1]
-
+        
+        self.NumStages = \
+            2 if all_nodenames == ['ROOT'] else self.rootnode.stage_max() 
+        self.NonLeafTerminals = \
+            [nd for nd in self.nonleaves if nd.stage == self.NumStages-1]
+        
+        self.NumLeaves = len(desc_leaf_dict) - len(self.nonleaves)
+        if self.NumStages>2 and self.NumLeaves != self.NumScens:
+            raise RuntimeError("The all_nodenames argument is giving an inconsistent tree."
+                               f"There are {self.NumLeaves} leaves for this tree, but {self.NumScens} scenarios are given.")
     def scen_names_to_ranks(self, n_proc):
         """ 
         Args:
@@ -752,10 +1041,61 @@ def find_active_objective(pyomomodel):
                            % (pyomomodel.name, len(obj)))
     return obj[0]
 
+def create_nodenames_from_BFs(BFS):
+    """
+    This function creates the node names of a tree without creating the whole tree.
+
+    Parameters
+    ----------
+    BFS : list of integers
+        Branching factors.
+
+    Returns
+    -------
+    nodenames : list of str
+        a list of the node names induced by BFs, including leaf nodes.
+
+    """
+    stage_nodes = ["ROOT"]
+    nodenames = ['ROOT']
+    if len(BFS)==1 : #2stage
+        return(nodenames)
+    for bf in BFS[:(len(BFS))]:
+        old_stage_nodes = stage_nodes
+        stage_nodes = []
+        for k in range(len(old_stage_nodes)):
+            stage_nodes += ['%s_%i'%(old_stage_nodes[k],b) for b in range(bf)]
+        nodenames += stage_nodes
+    return nodenames
+
+def get_BFs_from_nodenames(all_nodenames):
+    #WARNING: Do not work with unbalanced trees
+    staget_node = "ROOT"
+    BFs = []
+    while staget_node+"_0" in all_nodenames:
+        child_regex = re.compile(staget_node+'_\d*\Z')
+        child_list = [x for x in all_nodenames if child_regex.match(x) ]
+        
+        BFs.append(len(child_list))
+        staget_node += "_0"
+    if len(BFs)==1:
+        #2stage
+        return None
+    else:
+        return BFs
+    
+def number_of_nodes(BFs):
+    #How many nodes does a tree with a given BFs have ?
+    last_node_stage_num = [i-1 for i in BFs]
+    return node_idx(last_node_stage_num, BFs)
+    
+
+
+          
 
 if __name__ == "__main__":
     BFs = [2,2,2,3]
-    numscens = prod(BFs)
+    numscens = np.prod(BFs)
     scennames = ["Scenario"+str(i) for i in range(numscens)]
     testtree = _ScenTree(BFs, scennames)
     print("nonleaves:")

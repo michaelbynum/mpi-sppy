@@ -5,13 +5,14 @@
 
 # There is  manipulation of the mip gap,
 #  so we need modifications of the vanilla dicts.
-# Notice also that this uses MutliPHExtensions
+# Notice also that this uses MutliExtensions
 import sys
 import json
 import uc_funcs as uc
 
-from mpisppy.utils.sputils import spin_the_wheel
-from mpisppy.extensions.extension import MultiPHExtension
+import mpisppy.utils.sputils as sputils
+
+from mpisppy.extensions.extension import MultiExtension
 from mpisppy.extensions.fixer import Fixer
 from mpisppy.extensions.mipgapper import Gapper
 from mpisppy.extensions.xhatclosest import XhatClosest
@@ -85,7 +86,7 @@ def main():
     # Start with Vanilla PH hub
     hub_dict = vanilla.ph_hub(*beans,
                               scenario_creator_kwargs=scenario_creator_kwargs,
-                              ph_extensions=MultiPHExtension,
+                              ph_extensions=MultiExtension,
                               rho_setter = rho_setter)
 
     # Extend and/or correct the vanilla dictionary
@@ -97,19 +98,19 @@ def main():
     if args.xhat_closest_tree:
         ext_classes.append(XhatClosest)
         
-    hub_dict["opt_kwargs"]["PH_extension_kwargs"] = {"ext_classes" : ext_classes}
+    hub_dict["opt_kwargs"]["extension_kwargs"] = {"ext_classes" : ext_classes}
     if with_cross_scenario_cuts:
-        hub_dict["opt_kwargs"]["PHoptions"]["cross_scen_options"]\
+        hub_dict["opt_kwargs"]["options"]["cross_scen_options"]\
             = {"check_bound_improve_iterations" : args.cross_scenario_iter_cnt}
 
     if with_fixer:
-        hub_dict["opt_kwargs"]["PHoptions"]["fixeroptions"] = {
+        hub_dict["opt_kwargs"]["options"]["fixeroptions"] = {
             "verbose": args.with_verbose,
             "boundtol": fixer_tol,
             "id_fix_list_fct": uc.id_fix_list_fct,
         }
     if args.xhat_closest_tree:
-        hub_dict["opt_kwargs"]["PHoptions"]["xhat_closest_options"] = {
+        hub_dict["opt_kwargs"]["options"]["xhat_closest_options"] = {
             "xhat_solver_options" : dict(),
             "keep_solution" : True
         }
@@ -120,14 +121,14 @@ def main():
         mipgapdict = {int(i): din[i] for i in din}
     else:
         mipgapdict = None
-    hub_dict["opt_kwargs"]["PHoptions"]["gapperoptions"] = {
+    hub_dict["opt_kwargs"]["options"]["gapperoptions"] = {
         "verbose": args.with_verbose,
         "mipgapdict": mipgapdict
         }
         
     if args.default_rho is None:
         # since we are using a rho_setter anyway
-        hub_dict.opt_kwargs.PHoptions["defaultPHrho"] = 1  
+        hub_dict.opt_kwargs.options["defaultPHrho"] = 1  
     ### end ph spoke ###
     
     # FWPH spoke
@@ -150,7 +151,7 @@ def main():
        
     # cross scenario cut spoke
     if with_cross_scenario_cuts:
-        cross_scenario_cut_spoke = vanilla.cross_scenario_cut_spoke(*beans, scenario_creator_kwargs=scenario_creator_kwargs)
+        cross_scenario_cuts_spoke = vanilla.cross_scenario_cuts_spoke(*beans, scenario_creator_kwargs=scenario_creator_kwargs)
 
     list_of_spoke_dict = list()
     if with_fwph:
@@ -162,12 +163,13 @@ def main():
     if with_xhatshuffle:
         list_of_spoke_dict.append(xhatshuffle_spoke)
     if with_cross_scenario_cuts:
-        list_of_spoke_dict.append(cross_scenario_cut_spoke)
+        list_of_spoke_dict.append(cross_scenario_cuts_spoke)
 
-    spcomm, opt_dict = spin_the_wheel(hub_dict, list_of_spoke_dict)
+    spcomm, opt_dict = sputils.spin_the_wheel(hub_dict, list_of_spoke_dict)
 
     if args.solution_dir is not None:
-        uc.write_solution(spcomm, opt_dict, args.solution_dir)
+        sputils.write_spin_the_wheel_tree_solution(
+                spcomm, opt_dict, args.solution_dir, uc.scenario_tree_solution_writer )
 
 
 if __name__ == "__main__":

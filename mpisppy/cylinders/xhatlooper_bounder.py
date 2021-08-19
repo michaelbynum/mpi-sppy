@@ -3,6 +3,7 @@
 # updated April 2020
 import mpisppy.cylinders.spoke as spoke
 from mpisppy.extensions.xhatlooper import XhatLooper
+from mpisppy.utils.xhat_eval import Xhat_Eval
 import logging
 import mpisppy.log
 
@@ -22,18 +23,15 @@ class XhatLooperInnerBound(spoke.InnerBoundNonantSpoke):
         if "bundles_per_rank" in self.opt.options\
            and self.opt.options["bundles_per_rank"] != 0:
             raise RuntimeError("xhat spokes cannot have bundles (yet)")
-            
+
+        if not isinstance(self.opt, Xhat_Eval):
+            raise RuntimeError("XhatShuffleInnerBound must be used with Xhat_Eval.")
+
         xhatter = XhatLooper(self.opt)
-
-        self.opt.PH_Prep()  
-        logger.debug(f"  xhatlooper spoke back from PH_Prep rank {self.global_rank}")
-
-        self.opt.subproblem_creation(verbose)
 
         ### begin iter0 stuff
         xhatter.pre_iter0()
         self.opt._save_original_nonants()
-        self.opt._create_solvers()
 
         teeme = False
         if "tee-rank0-solves" in self.opt.options:
@@ -87,11 +85,8 @@ class XhatLooperInnerBound(spoke.InnerBoundNonantSpoke):
 
                 self.opt._put_nonant_cache(self.localnonants)
                 self.opt._restore_nonants()
-                upperbound, srcsname = xhatter.xhat_looper(scen_limit=scen_limit)
+                upperbound, srcsname = xhatter.xhat_looper(scen_limit=scen_limit, restore_nonants=False)
 
                 # send a bound to the opt companion
-                if upperbound is not None:
-                    self.bound = upperbound
-                    logger.debug(f'   send inner bound={upperbound} on rank {self.global_rank} (based on scenario {srcsname})')
-                logger.debug(f'   bottom of xhatlooper loop on rank {self.global_rank}')
+                self.update_if_improving(upperbound)
             xh_iter += 1

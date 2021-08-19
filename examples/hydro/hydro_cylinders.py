@@ -4,7 +4,8 @@
 
 import hydro
 
-from mpisppy.utils.sputils import spin_the_wheel
+import mpisppy.utils.sputils as sputils
+
 from mpisppy.utils import baseparsers
 from mpisppy.utils import vanilla
 
@@ -17,6 +18,8 @@ import mpisppy.cylinders as cylinders
 # we reduce it so as not to dominate the
 # time spent for cylinder synchronization
 cylinders.SPOKE_SLEEP_TIME = 0.0001
+
+write_solution = True
 
 def _parse_args():
     parser = baseparsers.make_multistage_parser()
@@ -33,20 +36,15 @@ def main():
 
     args = _parse_args()
 
-    BFs = [int(bf) for bf in args.BFs.split(',')]
+    BFs = args.branching_factors
     if len(BFs) != 2:
         raise RuntimeError("Hydro is a three stage problem, so it needs 2 BFs")
 
-    with_xhatspecific = args.with_xhatspecific
+    with_xhatshuffle = args.with_xhatshuffle
     with_lagrangian = args.with_lagrangian
 
     # This is multi-stage, so we need to supply node names
-    all_nodenames = ["ROOT"] # all trees must have this node
-    # The rest is a naming convention invented for this problem.
-    # Note that mpisppy does not have nodes at the leaves,
-    # and node names must end in a serial number.
-    for b in range(BFs[0]):
-        all_nodenames.append("ROOT_"+str(b))
+    all_nodenames = sputils.create_nodenames_from_BFs(BFs)
 
     ScenCount = BFs[0] * BFs[1]
     scenario_creator_kwargs = {"branching_factors": BFs}
@@ -62,44 +60,39 @@ def main():
     hub_dict = vanilla.ph_hub(*beans,
                               scenario_creator_kwargs=scenario_creator_kwargs,
                               ph_extensions=None,
-                              rho_setter = rho_setter)
-    hub_dict["opt_kwargs"]["all_nodenames"] = all_nodenames
-    hub_dict["opt_kwargs"]["PHoptions"]["branching_factors"] = BFs
+                              rho_setter = rho_setter,
+                              all_nodenames = all_nodenames)
 
     # Standard Lagrangian bound spoke
     if with_lagrangian:
         lagrangian_spoke = vanilla.lagrangian_spoke(*beans,
                                               scenario_creator_kwargs=scenario_creator_kwargs,
-                                              rho_setter = rho_setter)
-        lagrangian_spoke["opt_kwargs"]["all_nodenames"] = all_nodenames
-        lagrangian_spoke["opt_kwargs"]["PHoptions"]["branching_factors"] = BFs
+                                              rho_setter = rho_setter,
+                                              all_nodenames = all_nodenames)
 
     # xhat looper bound spoke
-    xhat_scenario_dict = {"ROOT": "Scen1",
-                          "ROOT_0": "Scen1",
-                          "ROOT_1": "Scen4",
-                          "ROOT_2": "Scen7"}
     
-    if with_xhatspecific:
-        xhatspecific_spoke = vanilla.xhatspecific_spoke(*beans,
-                                                        xhat_scenario_dict,
-                                                        all_nodenames,
-                                                        BFs,
+    if with_xhatshuffle:
+        xhatshuffle_spoke = vanilla.xhatshuffle_spoke(*beans,
+                                                        all_nodenames=all_nodenames,
                                                         scenario_creator_kwargs=scenario_creator_kwargs)
 
     list_of_spoke_dict = list()
     if with_lagrangian:
         list_of_spoke_dict.append(lagrangian_spoke)
-    if with_xhatspecific:
-        list_of_spoke_dict.append(xhatspecific_spoke)
+    if with_xhatshuffle:
+        list_of_spoke_dict.append(xhatshuffle_spoke)
 
-    spcomm, opt_dict = spin_the_wheel(hub_dict, list_of_spoke_dict)
+    spcomm, opt_dict = sputils.spin_the_wheel(hub_dict, list_of_spoke_dict)
 
     if "hub_class" in opt_dict:  # we are a hub rank
         if spcomm.opt.cylinder_rank == 0:  # we are the reporting hub rank
             print("BestInnerBound={} and BestOuterBound={}".\
                   format(spcomm.BestInnerBound, spcomm.BestOuterBound))
     
+    if write_solution:
+        sputils.write_spin_the_wheel_first_stage_solution(spcomm, opt_dict, 'hydro_first_stage.csv')
+        sputils.write_spin_the_wheel_tree_solution(spcomm, opt_dict, 'hydro_full_solution')
 
 if __name__ == "__main__":
     main()

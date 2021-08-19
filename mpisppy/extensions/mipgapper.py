@@ -1,7 +1,7 @@
 # Copyright 2020 by B. Knueven, D. Mildebrath, C. Muir, J-P Watson, and D.L. Woodruff
 # This software is distributed under the 3-clause BSD License.
 """ Code for a mipgap schedule. This can be used
-    as the only extension, but it could also be called from a "master"
+    as the only extension, but it could also be called from a "multi"
     extension.
 """
 
@@ -13,9 +13,9 @@ class Gapper(mpisppy.extensions.extension.Extension):
     def __init__(self, ph):
         self.ph = ph
         self.cylinder_rank = self.ph.cylinder_rank
-        self.gapperoptions = self.ph.PHoptions["gapperoptions"] # required
+        self.gapperoptions = self.ph.options["gapperoptions"] # required
         self.mipgapdict = self.gapperoptions["mipgapdict"]
-        self.verbose = self.ph.PHoptions["verbose"] \
+        self.verbose = self.ph.options["verbose"] \
                        or self.gapperoptions["verbose"]
                        
     def _vb(self, str):

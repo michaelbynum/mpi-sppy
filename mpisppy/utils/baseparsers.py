@@ -152,21 +152,105 @@ def make_parser(progname=None, num_scens_reqd=False):
     parser = _common_args(parser)
     return parser
 
+def _basic_multistage(progname=None, num_scens_reqd=False):
+    parser = argparse.ArgumentParser(prog=progname, conflict_handler="resolve")
+
+    parser.add_argument("--branching-factors",
+                        help="Spaces delimited branching factors (e.g., 2 2)",
+                        dest="branching_factors",
+                        nargs="*",
+                        type=int,
+                        default=None)
+        
+    if num_scens_reqd:
+        parser.add_argument(
+            "num_scens", help="Number of scenarios", type=int
+        )
+    else:
+        parser.add_argument(
+            "--num-scens",
+            help="Number of scenarios (default None)",
+            dest="num_scens",
+            type=int,
+            default=None,
+        )
+    return parser
+
+
 def make_multistage_parser(progname=None):
     # make a parser for the program named progname
     # NOTE: if you want abbreviations, override the arguments in your example
     # do not add abbreviations here.
-    parser = argparse.ArgumentParser(prog=progname, conflict_handler="resolve")
-
-    # the default is intended more as an example than as a default
-    parser.add_argument("--BFs",
-                        help="Comma delimied branching factors (default 2,2)",
-                        dest="BFs",
-                        type=str,
-                        default="2,2")
+    parser = _basic_multistage(progname=None)
     parser = _common_args(parser)
     return parser
 
+#### EF ####
+def make_EF2_parser(progname=None, num_scens_reqd=False):
+    # create a parser just for EF two-stage (does not call _common_args)
+    # NOTE: if you want abbreviations, override the arguments in your example
+    # do not add abbreviations here.
+    parser = argparse.ArgumentParser(prog=progname, conflict_handler="resolve")
+
+    if num_scens_reqd:
+        parser.add_argument(
+            "num_scens", help="Number of scenarios", type=int
+        )
+    else:
+        parser.add_argument(
+            "--num-scens",
+            help="Number of scenarios (default None)",
+            dest="num_scens",
+            type=int,
+            default=None,
+        )
+        
+    parser.add_argument("--EF-solver-name",
+                        help = "solver name (default gurobi)",
+                        dest="EF_solver_name",
+                        type = str,
+                        default="gurobi")
+
+
+    parser.add_argument("--EF-mipgap",
+                        help="mip gap option for the solver if needed (default None)",
+                        dest="EF_mipgap",
+                        type=float,
+                        default=None)
+    return parser
+
+def make_EF_multistage_parser(progname=None, num_scens_reqd=False):
+    # create a parser just for EF multi-stage (does not call _common_args)
+    # NOTE: if you want abbreviations, override the arguments in your example
+    # do not add abbreviations here.
+    parser = _basic_multistage(progname=None)
+    
+    if num_scens_reqd:
+        parser.add_argument(
+            "num_scens", help="Number of scenarios", type=int
+        )
+    else:
+        parser.add_argument(
+            "--num-scens",
+            help="Number of scenarios (default None)",
+            dest="num_scens",
+            type=int,
+            default=None,
+        )
+        
+    parser.add_argument("--EF-solver-name",
+                        help = "solver name (default gurobi)",
+                        dest="EF_solver_name",
+                        type = str,
+                        default="gurobi")
+
+
+    parser.add_argument("--EF-mipgap",
+                        help="mip gap option for the solver if needed (default None)",
+                        dest="EF_mipgap",
+                        type=float,
+                        default=None)
+    return parser
 ##### common additions to the command line #####
 
 def two_sided_args(inparser):
@@ -357,11 +441,11 @@ def lagranger_args(inparser):
 def xhatlooper_args(inparser):
     parser = inparser
     parser.add_argument('--with-xhatlooper',
-                        help="have an xhatlooper spoke",
+                        help="have an xhatlooper spoke (default)",
                         dest='with_xhatlooper',
                         action='store_true')
     parser.add_argument('--no-xhatlooper',
-                        help="do not have an xhatlooper spoke (default)",
+                        help="do not have an xhatlooper spoke",
                         dest='with_xhatlooper',
                         action='store_false')
     parser.set_defaults(with_xhatlooper=False)
@@ -385,6 +469,16 @@ def xhatshuffle_args(inparser):
                         dest='with_xhatshuffle',
                         action='store_false')
     parser.set_defaults(with_xhatshuffle=True)
+    parser.add_argument('--add-reversed-shuffle',
+                        help="using also the reversed shuffling (multistage only, default True)",
+                        dest = 'add_reversed_shuffle',
+                        action='store_true')
+    parser.set_defaults(add_reversed_shuffle=True)
+    parser.add_argument('--xhatshuffle-iter-step',
+                        help="step in shuffled list between 2 scenarios to try (default None)",
+                        dest="xhatshuffle_iter_step",
+                        type=int,
+                        default=None)
 
     return parser
 
@@ -400,7 +494,7 @@ def xhatspecific_args(inparser):
                         help="do not have an xhatspecific spoke",
                         dest='with_xhatspecific',
                         action='store_false')
-    parser.set_defaults(with_xhatspecific=True)
+    parser.set_defaults(with_xhatspecific=False)
 
     return parser
 
@@ -454,11 +548,11 @@ def cross_scenario_cuts_args(inparser):
     # we will not try to get the specification from the command line
     parser = inparser
     parser.add_argument('--with-cross-scenario-cuts',
-                        help="have a cross scenario cut spoke (default)",
+                        help="have a cross scenario cuts spoke (default)",
                         dest='with_cross_scenario_cuts',
                         action='store_true')
     parser.add_argument('--no-cross-scenario-cuts',
-                        help="do not have a cross scenario cut spoke",
+                        help="do not have a cross scenario cuts spoke",
                         dest='with_cross_scenario_cuts',
                         action='store_false')
     parser.set_defaults(with_cross_scenario_cuts=True)

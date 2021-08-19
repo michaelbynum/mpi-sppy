@@ -30,6 +30,8 @@ class SPOpt(SPBase):
             scenario_denouement=None,
             all_nodenames=None,
             mpicomm=None,
+            extensions=None,
+            extension_kwargs=None,
             scenario_creator_kwargs=None,
             variable_probability=None,
             E1_tolerance=1e-5
@@ -45,6 +47,16 @@ class SPOpt(SPBase):
             variable_probability=variable_probability,
         )
         self.current_solver_options = None
+        self.extensions = extensions
+        self.extension_kwargs = extension_kwargs
+
+        if (self.extensions is not None):
+            if self.extension_kwargs is None:
+                self.extobject = self.extensions(self)
+            else:
+                self.extobject = self.extensions(
+                    self, **self.extension_kwargs
+                )
 
 
     def solve_one(self, solver_options, k, s,
@@ -117,6 +129,9 @@ class SPOpt(SPBase):
                            np.mean(all_set_objective_times),
                            np.max(all_set_objective_times)))
 
+        if self.extensions is not None:
+            results = self.extobject.pre_solve(s)
+
         solve_start_time = time.time()
         if (solver_options):
             _vb("Using sub-problem solver options="
@@ -142,7 +157,7 @@ class SPOpt(SPBase):
             results = None
             solver_exception = e
 
-        if self.PH_extensions is not None:
+        if self.extensions is not None:
             results = self.extobject.post_solve(s, results)
 
         pyomo_solve_time = time.time() - solve_start_time
@@ -476,7 +491,7 @@ class SPOpt(SPBase):
 
 
     def _put_nonant_cache(self, cache):
-        """ Put the value in the cache for noants *for all local scenarios*
+        """ Put the value in the cache for nonants *for all local scenarios*
         Args:
             cache (np vector) to receive the nonant's for all local scenarios
 
@@ -539,6 +554,50 @@ class SPOpt(SPBase):
                     this_vardata.fix()
                     if persistent_solver is not None:
                         persistent_solver.update_var(this_vardata)
+                        
+    def _fix_root_nonants(self,root_cache):
+        """ Fix the 1st stage Vars subject to non-anticipativity at given values.
+            Loop over the scenarios to restore, but loop over subproblems
+            to alert persistent solvers.
+            Useful for multistage to find feasible solutions with a given scenario.
+        Args:
+            root_cache (numpy vector): values at which to fix
+        WARNING: 
+            We are counting on Pyomo indices not to change order between
+            when the cache_list is created and used.
+        NOTE:
+            You probably want to call _save_nonants right before calling this
+        """
+        for k,s in self.local_scenarios.items():
+
+            persistent_solver = None
+            if (sputils.is_persistent(s._solver_plugin)):
+                persistent_solver = s._solver_plugin
+
+            nlens = s._mpisppy_data.nlens
+            
+            rootnode = None
+            for node in s._mpisppy_node_list:
+                if node.name == 'ROOT':
+                    rootnode = node
+                    break
+                
+            if rootnode is None:
+                raise RuntimeError("Could not find a 'ROOT' node in scen {}"\
+                                   .format(k))
+            if root_cache is None:
+                raise RuntimeError("Empty root cache for scen={}".format(k))
+            if len(root_cache) != nlens['ROOT']:
+                raise RuntimeError("Needed {} nonant Vars for 'ROOT', got {}"\
+                                   .format(nlens['ROOT'], len(root_cache)))
+            
+            for i in range(nlens['ROOT']): 
+                this_vardata = node.nonant_vardata_list[i]
+                this_vardata._value = root_cache[i]
+                this_vardata.fix()
+                if persistent_solver is not None:
+                    persistent_solver.update_var(this_vardata)
+                        
 
 
     def _restore_nonants(self):
@@ -748,42 +807,13 @@ class SPOpt(SPBase):
             s._solver_plugin = SolverFactory(self.options["solvername"])
 
             if (sputils.is_persistent(s._solver_plugin)):
-
-                if (self.options["display_timing"]):
+                dtiming = ("display_timing" in self.options) and self.options["display_timing"]
+                if dtiming:
                     set_instance_start_time = time.time()
 
-                # this loop is required to address the sitution where license
-                # token servers become temporarily over-subscribed / non-responsive
-                # when large numbers of ranks are in use.
+                set_instance_retry(s, s._solver_plugin, sname)
 
-                # these parameters should eventually be promoted to a non-PH
-                # general class / location. even better, the entire retry
-                # logic can be encapsulated in a sputils.py function.
-                MAX_ACQUIRE_LICENSE_RETRY_ATTEMPTS = 5
-                LICENSE_RETRY_SLEEP_TIME = 2 # in seconds
-        
-                num_retry_attempts = 0
-                while True:
-                    try:
-                        s._solver_plugin.set_instance(s)
-                        if num_retry_attempts > 0:
-                            print("Acquired solver license (call to set_instance() for scenario=%s) after %d retry attempts" % (sname, num_retry_attempts))
-                        break
-                    # pyomo presently has no general way to trap a license acquisition
-                    # error - so we're stuck with trapping on "any" exception. not ideal.
-                    except:
-                        if num_retry_attempts == 0:
-                            print("Failed to acquire solver license (call to set_instance() for scenario=%s) after first attempt" % (sname))
-                        else:
-                            print("Failed to acquire solver license (call to set_instance() for scenario=%s) after %d retry attempts" % (sname, num_retry_attempts))
-                        if num_retry_attempts == MAX_ACQUIRE_LICENSE_RETRY_ATTEMPTS:
-                            raise RuntimeError("Failed to acquire solver license - call to set_instance() for scenario=%s failed after %d retry attempts" % (sname, num_retry_attempts))
-                        else:
-                            print("Sleeping for %d seconds before re-attempting" % LICENSE_RETRY_SLEEP_TIME)
-                            time.sleep(LICENSE_RETRY_SLEEP_TIME)
-                            num_retry_attempts += 1
-
-                if (self.options["display_timing"]):
+                if dtiming:
                     set_instance_time = time.time() - set_instance_start_time
                     all_set_instance_times = self.mpicomm.gather(set_instance_time,
                                                                  root=0)
@@ -801,3 +831,38 @@ class SPOpt(SPBase):
                 for scen_name in s.scen_list:
                     scen = self.local_scenarios[scen_name]
                     scen._solver_plugin = s._solver_plugin
+
+
+# these parameters should eventually be promoted to a non-PH
+# general class / location. even better, the entire retry
+# logic can be encapsulated in a sputils.py function.
+MAX_ACQUIRE_LICENSE_RETRY_ATTEMPTS = 5
+LICENSE_RETRY_SLEEP_TIME = 2 # in seconds
+
+def set_instance_retry(subproblem, solver_plugin, subproblem_name):
+
+    sname = subproblem_name
+    # this loop is required to address the sitution where license
+    # token servers become temporarily over-subscribed / non-responsive
+    # when large numbers of ranks are in use.
+
+    num_retry_attempts = 0
+    while True:
+        try:
+            solver_plugin.set_instance(subproblem)
+            if num_retry_attempts > 0:
+                print("Acquired solver license (call to set_instance() for scenario=%s) after %d retry attempts" % (sname, num_retry_attempts))
+            break
+        # pyomo presently has no general way to trap a license acquisition
+        # error - so we're stuck with trapping on "any" exception. not ideal.
+        except:
+            if num_retry_attempts == 0:
+                print("Failed to acquire solver license (call to set_instance() for scenario=%s) after first attempt" % (sname))
+            else:
+                print("Failed to acquire solver license (call to set_instance() for scenario=%s) after %d retry attempts" % (sname, num_retry_attempts))
+            if num_retry_attempts == MAX_ACQUIRE_LICENSE_RETRY_ATTEMPTS:
+                raise RuntimeError("Failed to acquire solver license - call to set_instance() for scenario=%s failed after %d retry attempts" % (sname, num_retry_attempts))
+            else:
+                print("Sleeping for %d seconds before re-attempting" % LICENSE_RETRY_SLEEP_TIME)
+                time.sleep(LICENSE_RETRY_SLEEP_TIME)
+                num_retry_attempts += 1

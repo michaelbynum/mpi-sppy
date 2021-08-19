@@ -13,10 +13,12 @@ MPI is used.
    overview.rst
    scenario_creator.rst
    drivers.rst
+   amalgomator.rst
    examples.rst
    hubs.rst
    spokes.rst
    extensions.rst
+   confidence_intervals.rst
    pysp.rst
    ef.rst
    secretmenu.rst

@@ -5,6 +5,7 @@
 
 import mpisppy.cylinders.spoke as spoke
 from mpisppy.extensions.xhatspecific import XhatSpecific
+from mpisppy.utils.xhat_eval import Xhat_Eval
 
 import mpi4py.MPI as mpi
 import logging
@@ -29,18 +30,17 @@ class XhatSpecificInnerBound(spoke.InnerBoundNonantSpoke):
         if "bundles_per_rank" in self.opt.options\
            and self.opt.options["bundles_per_rank"] != 0:
             raise RuntimeError("xhat spokes cannot have bundles (yet)")
+
+        if not isinstance(self.opt, Xhat_Eval):
+            raise RuntimeError("XhatShuffleInnerBound must be used with Xhat_Eval.")
+
         verbose = self.opt.options['verbose']
         xhatter = XhatSpecific(self.opt)
         # somehow deal with the prox option .... TBD .... important for aph APH
-        self.opt.PH_Prep()  
-        logging.debug("  ib back from Prep global rank {}".format(global_rank))
-
-        self.opt.subproblem_creation(verbose)
 
         # begin iter0 stuff
         xhatter.pre_iter0()
         self.opt._save_original_nonants()
-        self.opt._create_solvers()
 
         teeme = False
         if ("tee-rank0-solves" in self.opt.options):
@@ -103,16 +103,9 @@ class XhatSpecificInnerBound(spoke.InnerBoundNonantSpoke):
 
                 self.opt._put_nonant_cache(self.localnonants)  # don't really need all caches
                 self.opt._restore_nonants()
-                innerbound = xhatter.xhat_tryit(xhat_scenario_dict)
+                innerbound = xhatter.xhat_tryit(xhat_scenario_dict, restore_nonants=False)
 
-                # send a bound to the opt companion
-                if innerbound is not None:
-                    self.bound = innerbound
-                    logging.debug('send ib={}; global rank={} (specified dict)'\
-                                  .format(innerbound, global_rank))
-                    dtm.debug(f'Computed inner bound on rank {global_rank}: {self.bound:.4f}')
-                    logging.debug('   bottom of ib loop on global rank {}'\
-                                  .format(global_rank))
+                self.update_if_improving(innerbound)
 
             ib_iter += 1
 

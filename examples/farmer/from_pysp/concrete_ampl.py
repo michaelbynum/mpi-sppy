@@ -24,9 +24,9 @@ except:
     sys.exit()
 
 pref = os.path.join("..","PySP")
-farmer = PySPModel(scenario_creator=os.path.join(pref,"concrete",
+farmer = PySPModel(model=os.path.join(pref,"concrete",
                                                  "ReferenceModel.py"),
-                   tree_model=os.path.join(pref,"ScenarioStructure.dat"))
+                   scenario_tree=os.path.join(pref,"ScenarioStructure.dat"))
 
 phoptions = {'defaultPHrho': 1.0,
              'solvername':sys.argv[1],
@@ -39,10 +39,12 @@ phoptions = {'defaultPHrho': 1.0,
              'iterk_solver_options': None
              }
 
-ph = PH( PHoptions = phoptions,
+ph = PH( options = phoptions,
          all_scenario_names = farmer.all_scenario_names,
          scenario_creator = farmer.scenario_creator,
          scenario_denouement = farmer.scenario_denouement,
         )
 
 ph.ph_main()
+
+farmer.close()

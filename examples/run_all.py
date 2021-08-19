@@ -70,6 +70,33 @@ def do_one(dirname, progname, np, argstring):
     else:
         os.chdir("../..")   # hack for one level of subdirectories
 
+def do_one_mmw(dirname, progname, npyfile, efargstring, mmwargstring):
+    
+    os.chdir(dirname)
+    # solve ef, save .npy file (file name hardcoded in progname at the moment)
+    runefstring = "python {} --EF-solver-name {} {}".format(progname, solver_name, efargstring)
+    code = os.system("echo {} && {}".format(runefstring, runefstring))
+
+    if code!=0:
+        if dirname not in badguys:
+            badguys[dirname] = [runefstring]
+        else:
+            badguys[dirname].append(runefstring)
+    # run mmw, remove .npy file
+    else:
+        runstring = "python -m mpisppy.confidence_intervals.mmw_conf {} {} {} {}".\
+                    format(progname, npyfile, solver_name, mmwargstring)
+        code = os.system("echo {} && {}".format(runstring, runstring))
+        if code != 0:
+            if dirname not in badguys:
+                badguys[dirname] = [runstring]
+            else:
+                badguys[dirname].append(runstring)
+        
+        os.remove(npyfile)
+
+    os.chdir("..")
+
 do_one("farmer", "farmer_ef.py", 1,
        "1 3 {}".format(solver_name))
 do_one("farmer", "farmer_lshapedhub.py", 2,
@@ -129,6 +156,11 @@ do_one("farmer",
        2,
        f"30 --max-iterations=10 --default-rho=1.0 --with-display-progress  --bundles-per-rank=0 --no-lagrangian --no-xhatlooper --no-fwph --aph-gamma=1.0 --aph-nu=1.0 --aph-frac-needed=1.0 --aph-dispatch-frac=0.5 --abs-gap=1 --aph-sleep-seconds=0.01 --run-async --bundles-per-rank=5 --solver-name={solver_name}")
 
+do_one("farmer",
+       "farmer_ama.py",
+       3,
+       f"--num-scens=10 --crops-multiplier=3 --farmer-with-integer --EF-solver-name={solver_name}")
+
 do_one("netdes", "netdes_cylinders.py", 5,
        "--max-iterations=3 --instance-name=network-10-20-L-01 "
        "--solver-name={} --rel-gap=0.0 --default-rho=1 "
@@ -156,12 +188,34 @@ do_one("sslp",
        "--instance-name=sslp_15_45_10 --bundles-per-rank=2 "
        "--max-iterations=5 --default-rho=1 "
        "--solver-name={} --fwph-stop-check-tol 0.01".format(solver_name))
+
 do_one("hydro", "hydro_cylinders.py", 3,
-       "--BFs=3,3 --bundles-per-rank=0 --max-iterations=100 "
-       "--default-rho=1 --with-xhatspecific --with-lagrangian "
+       "--branching-factors 3 3 --bundles-per-rank=0 --max-iterations=100 "
+       "--default-rho=1 --with-xhatshuffle --with-lagrangian "
+       "--solver-name={}".format(solver_name))
+do_one("hydro", "hydro_cylinders_pysp.py", 3,
+       "--bundles-per-rank=0 --max-iterations=100 "
+       "--default-rho=1 --with-xhatshuffle --with-lagrangian "
        "--solver-name={}".format(solver_name))
 do_one("hydro", "hydro_ef.py", 1, solver_name)
 
+do_one("aircond", "aircond_cylinders.py", 4,
+       "--branching-factors 4 3 2 --bundles-per-rank=0 --max-iterations=100 "
+       "--default-rho=1 --with-xhatspecific --with-lagrangian --with-xhatshuffle "
+       "--solver-name={}".format(solver_name))
+do_one("aircond", "aircond_ama.py", 3,
+       "--branching-factors 3 3 --bundles-per-rank=0 --max-iterations=100 "
+       "--default-rho=1 --with-lagrangian --with-xhatshuffle "
+       "--solver-name={}".format(solver_name))
+
+
+#=========MMW TESTS==========
+
+do_one_mmw("farmer", "afarmer.py", "farmer_root_nonants_temp.npy", "--num-scens=3", "--alpha 0.95 --num-scens=3 --with-objective-gap")
+
+do_one_mmw("aircond", "aaircond.py", "aircond_root_nonants_temp.npy", "--num-scens=3", "--alpha 0.95 --num-scens=3 --solver-options ''")
+
+#============================
 
 if egret_avail():
     do_one("acopf3", "ccopf2wood.py", 2, f"2 3 2 0 {solver_name}")
@@ -194,6 +248,12 @@ if not nouc and egret_avail():
            "--lagrangian-iter0-mipgap=1e-7 --no-cross-scenario-cuts "
            "--ph-mipgaps-json=phmipgaps.json "
            "--solver-name={}".format(solver_name))
+    do_one("uc", "uc_ama.py", 3,
+           "--bundles-per-rank=0 --max-iterations=2 "
+           "--default-rho=1 --num-scens=3"
+           "--fixer-tol=1e-2 "
+           "--solver-name={}".format(solver_name))
+
     # 10-scenario UC
     do_one("uc", "uc_cylinders.py", 3,
            "--bundles-per-rank=5 --max-iterations=2 "
