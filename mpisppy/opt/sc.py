@@ -5,8 +5,10 @@ import parapint
 from typing import List, Callable, Dict, Optional, Tuple, Any, Union
 from pyomo.core.base.block import _BlockData
 from pyomo.core.base.var import _GeneralVarData
+from pyomo.core.expr.visitor import identify_variables
 from mpi4py import MPI
 from mpisppy.utils.sputils import find_active_objective
+from pyomo.common.collections.component_set import ComponentSet
 
 
 logger = logging.getLogger('mpisppy.sc')
@@ -21,6 +23,14 @@ def _assert_continuous(m: _BlockData):
             raise RuntimeError(f'Variable {v} in block {m} is not continuous; The Schur-Complement method only supports continuous problems.')
 
 
+def _get_all_used_unfixed_vars(m: _BlockData):
+    res = ComponentSet()
+    for c in m.component_data_objects(pyo.Constraint, active=True, descend_into=True):
+        res.update(v for v in identify_variables(c.body, include_fixed=False))
+    res.update(identify_variables(find_active_objective(m).expr, include_fixed=False))
+    return res
+
+
 class _SCInterface(parapint.interfaces.MPIStochasticSchurComplementInteriorPointInterface):
     def __init__(self,
                  local_scenario_models: Dict[str, _BlockData],
@@ -29,13 +39,34 @@ class _SCInterface(parapint.interfaces.MPIStochasticSchurComplementInteriorPoint
                  ownership_map: Dict):
         self.local_scenario_models = local_scenario_models
 
-        models = list(local_scenario_models.values())
-        ref_model = models[0]
-        models = models[1:]
-        self.nonant_vars = list(ref_model._mpisppy_data.nonant_indices.keys())
+        self._used_unfixed_vars_by_scenario = dict()
+
+        nonant_var_identifiers = list()
+        nonant_var_identifiers_set = set()
+        for scen_name, scen_model in self.local_scenario_models.items():
+            scen_variables = _get_all_used_unfixed_vars(scen_model)
+            self._used_unfixed_vars_by_scenario[scen_name] = scen_variables
+            for nonant_id, nonant_var in scen_model._mpisppy_data.nonant_indices.items():
+                if nonant_var in scen_variables:
+                    if nonant_id not in nonant_var_identifiers_set:
+                        nonant_var_identifiers.append(nonant_id)
+                        nonant_var_identifiers_set.add(nonant_id)
+
+        tmp = comm.allgather(nonant_var_identifiers)
+        tmp2 = list()
+        for i in tmp:
+            tmp2.extend(i)
+        tmp = tmp2
+        del tmp2
+        nonant_var_identifiers = list()
+        nonant_var_identifiers_set = set()
+        for nonant_id in tmp:
+            if nonant_id not in nonant_var_identifiers_set:
+                nonant_var_identifiers.append(nonant_id)
+                nonant_var_identifiers_set.add(nonant_id)
 
         super(_SCInterface, self).__init__(scenarios=all_scenario_names,
-                                           nonanticipative_var_identifiers=self.nonant_vars,
+                                           nonanticipative_var_identifiers=nonant_var_identifiers,
                                            comm=comm,
                                            ownership_map=ownership_map)
 
@@ -49,9 +80,11 @@ class _SCInterface(parapint.interfaces.MPIStochasticSchurComplementInteriorPoint
         active_obj.deactivate()
         m._mpisppy_model.weighted_obj = pyo.Objective(expr=m._mpisppy_probability * active_obj.expr, sense=active_obj.sense)
 
-        nonant_vars = m._mpisppy_data.nonant_indices
-        if len(nonant_vars) != len(self.nonant_vars):
-            raise ValueError(f'Number of non-anticipative variables is not consistent in scenario {scenario_identifier}.')
+        nonant_vars = dict()
+        scen_variables = self._used_unfixed_vars_by_scenario[scenario_identifier]
+        for nonant_id, _nonant_var in m._mpisppy_data.nonant_indices.items():
+            if _nonant_var in scen_variables:
+                nonant_vars[nonant_id] = _nonant_var
 
         return m, nonant_vars
 
@@ -90,7 +123,9 @@ class SchurComplement(SPBase):
         if isinstance(self.options, SCOptions):
             options = self.options()
         else:
-            options = SCOptions()(self.options)
+            options = dict(self.options)
+            options.pop('branching_factors', None)
+            options = SCOptions()(options)
         if options.linalg.solver is None:
             options.linalg.solver = parapint.linalg.MPISchurComplementLinearSolver(
                 subproblem_solvers={ndx: parapint.linalg.InteriorPointMA27Interface(cntl_options={1: 1e-6}) for ndx in range(len(self.all_scenario_names))},
